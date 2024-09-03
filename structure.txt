@@ -1,0 +1,19 @@
+scraper/
+├── app/
+│   ├── __init__.py
+│   ├── scraper.py
+│   ├── db.py
+│   ├── models.py
+│   ├── routes.py
+│   ├── auth.py
+│
+├── extract_info.py
+├── config.py
+├── requirements.txt
+├── main.py
+├── .env.example
+├── run.py
+├── .gitignore
+├── README.md
+├── LICENSE
+├── STRUCTURE.txt

@@ -1,0 +1,391 @@
+#### .env
+DATABASE_URL=mysql+mysqlconnector://username:password@127.0.0.1:3306/berlin_project
+SECRET_KEY=your-secret-key
+DEBUG=True
+ENV=development
+
+
+#### app/db.py
+from sqlmodel import SQLModel, create_engine, Session
+from sqlalchemy import create_engine as sqlalchemy_create_engine, text
+from sqlalchemy.exc import OperationalError
+from config import config
+import os
+from contextlib import contextmanager
+
+# Bestimmen Sie die Umgebung (Standard ist Entwicklung)
+env = os.getenv("ENV", "development")
+DATABASE_URL = config[env].SQLALCHEMY_DATABASE_URI
+
+# Manuelles Parsen der Datenbank-URL, um Verbindungsparameter zu extrahieren
+url_parts = DATABASE_URL.split('/')
+database_name = url_parts[-1]
+base_url = '/'.join(url_parts[:-1])
+
+# Manuell die Verbindungs-URL ohne den Datenbankteil konstruieren
+temp_url = f"{base_url}/"
+
+# Erstellen Sie eine temporäre Engine, um eine Verbindung zum MySQL-Server herzustellen
+temp_engine = sqlalchemy_create_engine(temp_url)
+
+try:
+    # Erstellen Sie die Datenbank, falls sie nicht existiert
+    with temp_engine.connect() as conn:
+        conn.execute(text(f"CREATE DATABASE IF NOT EXISTS {database_name}"))
+        conn.execute(text(f"USE {database_name}"))
+except OperationalError as e:
+    print(f"Fehler beim Verbinden mit der Datenbank: {e}")
+    raise
+
+# Erstellen Sie die eigentliche Engine für die Anwendung
+engine = create_engine(DATABASE_URL)
+
+def init_db():
+    SQLModel.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE service MODIFY COLUMN voraussetzungen TEXT"))
+        conn.execute(text("ALTER TABLE service MODIFY COLUMN erforderliche_unterlagen TEXT"))
+        conn.execute(text("ALTER TABLE service MODIFY COLUMN gebuehren TEXT"))
+        conn.execute(text("ALTER TABLE service MODIFY COLUMN rechtsgrundlagen TEXT"))
+        conn.execute(text("ALTER TABLE form MODIFY COLUMN url VARCHAR(2048)"))  # Hier die Länge der URL-Spalte ändern
+        conn.execute(text("ALTER TABLE form MODIFY COLUMN title VARCHAR(2048)"))  # Hier die Länge der Title-Spalte ändern
+
+@contextmanager
+def get_session():
+    session = Session(engine)
+    try:
+        yield session
+    finally:
+        session.close()
+		
+		
+#### app/models.py
+from sqlmodel import SQLModel, Field, Relationship
+from typing import List, Optional
+from sqlalchemy import Column, Text
+
+class Service(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    voraussetzungen: Optional[str] = Field(sa_column=Column(Text))
+    erforderliche_unterlagen: Optional[str] = Field(sa_column=Column(Text))
+    gebuehren: Optional[str] = Field(sa_column=Column(Text))
+    rechtsgrundlagen: Optional[str] = Field(sa_column=Column(Text))
+    forms: List["Form"] = Relationship(back_populates="service")
+
+class Form(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    title: str
+    url: str
+    service_id: Optional[int] = Field(default=None, foreign_key="service.id")
+    service: Optional[Service] = Relationship(back_populates="forms")
+
+class User(SQLModel, table=True):  # Hinzufügen der User-Klasse
+    id: Optional[int] = Field(default=None, primary_key=True)
+    username: str
+    email: str
+    hashed_password: str
+    is_active: bool = Field(default=True)
+	
+	
+### app/__init__.py	
+from fastapi import FastAPI
+from app.routes import router as api_router
+
+app = FastAPI()
+
+app.include_router(api_router)
+
+	
+#### app/routes.py
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from fastapi.security import OAuth2PasswordRequestForm
+from app.db import get_session
+from app.models import Service, Form, User
+from app.auth import authenticate_user, create_access_token, get_current_active_user
+
+router = APIRouter()
+
+@router.post("/token", response_model=dict)
+def login_for_access_token(db: Session = Depends(get_session), form_data: OAuth2PasswordRequestForm = Depends()):
+    user = authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = create_access_token(data={"sub": user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@router.get("/users/me/", response_model=User)
+def read_users_me(current_user: User = Depends(get_current_active_user)):
+    return current_user
+
+@router.get("/services/")
+def read_services(skip: int = 0, limit: int = 10, db: Session = Depends(get_session)):
+    services = db.query(Service).offset(skip).limit(limit).all()
+    return services
+	
+	
+#### app/scraper.py
+import requests
+from requests.exceptions import RequestException, Timeout
+from bs4 import BeautifulSoup
+from app.models import Service, Form
+from app.db import get_session
+import logging
+from tqdm import tqdm
+
+# Konfigurieren Sie das Logging
+logging.basicConfig(level=logging.WARNING)  # Ändern Sie das Level zu WARNING, um weniger detaillierte Informationen auszugeben
+logger = logging.getLogger(__name__)
+
+MAX_URL_LENGTH = 2048  # Setzen Sie die maximale Länge der URL
+
+def extract_info(url):
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error fetching the URL: {e}")
+        return None
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    # Extracting the title
+    title_element = soup.find('h1')
+    title = title_element.text.strip() if title_element else None
+
+    if title is None:
+        logger.error(f"NULL title found for URL: {url}")
+
+    # Function to extract content between sections
+    def extract_section_content(header):
+        content = []
+        section = header.find_next_sibling()
+        while section and section.name != 'h2':
+            content.append(section.get_text(separator="\n").strip())
+            section = section.find_next_sibling()
+        return "\n".join(content)
+
+    # Extracting the desired information
+    voraussetzungen_header = soup.find('h2', string='Voraussetzungen')
+    voraussetzungen = extract_section_content(voraussetzungen_header)
+
+    unterlagen_header = soup.find('h2', string='Erforderliche Unterlagen')
+    erforderliche_unterlagen = extract_section_content(unterlagen_header)
+
+    gebuehren_header = soup.find('h2', string='Gebühren')
+    gebuehren = extract_section_content(gebuehren_header) or "Keine Gebühren gefunden"
+
+    rechtsgrundlagen_header = soup.find('h2', string='Rechtsgrundlagen')
+    rechtsgrundlagen = extract_section_content(rechtsgrundlagen_header)
+
+    formular_header = soup.find('h2', string='Formulare')
+    formulare = []
+    if formular_header:
+        formular_list = formular_header.find_next_sibling('ul')
+        if formular_list:
+            formular_links = formular_list.find_all('a')
+            formulare = [{'title': link.text.strip(), 'url': link['href']} for link in formular_links]
+
+    return {
+        "title": title,
+        "voraussetzungen": voraussetzungen,
+        "erforderliche_unterlagen": erforderliche_unterlagen,
+        "gebuehren": gebuehren,
+        "rechtsgrundlagen": rechtsgrundlagen,
+        "formulare": formulare
+    }
+
+def crawl_data():
+    base_url = "https://service.berlin.de/dienstleistungen/"
+    try:
+        response = requests.get(base_url, timeout=10)
+        response.raise_for_status()
+    except (RequestException, Timeout) as e:
+        logger.error(f"Error fetching the main page: {e}")
+        return
+
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    # Debugging: HTML-Inhalt der Hauptseite ausgeben
+    logger.debug(f"HTML content of the main page: {soup.prettify()[:1000]}...")  # Nur die ersten 1000 Zeichen anzeigen
+
+    services = []
+    service_links = soup.select('div.span7 a')
+    logger.info(f"Found {len(service_links)} service links.")
+
+    # Verwenden Sie tqdm, um eine Fortschrittsanzeige hinzuzufügen
+    for link in tqdm(service_links, desc="Scraping services"):
+        service_url = link['href']
+        logger.info(f"Crawling service URL: {service_url}")
+        service_data = extract_info(service_url)
+        if not service_data:
+            continue
+
+        if service_data['title'] is None:
+            logger.error(f"NULL title found for service URL: {service_url}")
+            continue
+
+        logger.info(f"Service Title: {service_data['title']}")
+        logger.debug(f"Prerequisites: {service_data['voraussetzungen'][:100]}...")  # Nur die ersten 100 Zeichen anzeigen
+        logger.debug(f"Required Documents: {service_data['erforderliche_unterlagen'][:100]}...")  # Nur die ersten 100 Zeichen anzeigen
+        logger.debug(f"Fees: {service_data['gebuehren'][:100]}...")  # Nur die ersten 100 Zeichen anzeigen
+        logger.debug(f"Legal Basis: {service_data['rechtsgrundlagen'][:100]}...")  # Nur die ersten 100 Zeichen anzeigen
+        logger.debug(f"Forms: {service_data['formulare']}")
+
+        with get_session() as session:
+            # Dienstleistung erstellen
+            service = Service(
+                title=service_data['title'],
+                voraussetzungen=service_data['voraussetzungen'],
+                erforderliche_unterlagen=service_data['erforderliche_unterlagen'],
+                gebuehren=service_data['gebuehren'],
+                rechtsgrundlagen=service_data['rechtsgrundlagen']
+            )
+            services.append(service)
+
+            for form_data in service_data['formulare']:
+                if form_data['title'] is None:
+                    logger.error(f"NULL title found for form URL: {form_data['url']} in service URL: {service_url}")
+                    continue
+                if len(form_data['url']) > MAX_URL_LENGTH:
+                    logger.error(f"URL too long for form URL: {form_data['url']} in service URL: {service_url}")
+                    continue
+                form = Form(title=form_data['title'], url=form_data['url'], service=service)
+                service.forms.append(form)
+
+            session.add_all(services)
+            session.commit()
+            logger.info("Data committed to the database.")
+
+if __name__ == "__main__":
+    crawl_data()
+	
+	
+#### config.py
+import os
+from dotenv import load_dotenv
+
+# Laden der Umgebungsvariablen aus der .env-Datei
+load_dotenv()
+
+class Config:
+    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL")
+    SECRET_KEY = os.getenv("SECRET_KEY")
+    DEBUG = os.getenv("DEBUG", "False").lower() in ["true", "1", "t"]
+    ENV = os.getenv("ENV", "development")
+
+class DevelopmentConfig(Config):
+    pass
+
+class ProductionConfig(Config):
+    DEBUG = False
+
+config = {
+    "development": DevelopmentConfig,
+    "production": ProductionConfig
+}
+
+	
+#### app/auth.py
+from datetime import datetime, timedelta
+from typing import Optional
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session
+from app.models import User
+from app.db import get_session
+import os
+
+# Geheimlüssel zum Signieren der JWTs
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def authenticate_user(db: Session, username: str, password: str):
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        return False
+    if not verify_password(password, user.hashed_password):
+        return False
+    return user
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_session)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+async def get_current_active_user(current_user: User = Depends(get_current_user)):
+    if not current_user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+    return current_user
+	
+	
+#### main.py
+from fastapi import FastAPI
+from sqlmodel import SQLModel
+from app.db import engine
+from app.routes import router
+
+app = FastAPI()
+
+@app.on_event("startup")
+def on_startup():
+    SQLModel.metadata.create_all(engine)
+
+app.include_router(router)
+
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the Service API!"}
+
+
+#### run.py
+from app.scraper import crawl_data
+from app.db import init_db
+from dotenv import load_dotenv
+
+# Laden der Umgebungsvariablen aus der .env-Datei
+load_dotenv()
+
+if __name__ == "__main__":
+    init_db()
+    crawl_data()

@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+sqlmodel
+sqlalchemy
+mysql-connector-python
+requests
+beautifulsoup4
+python-dotenv
+python-jose
+passlib[bcrypt]
+tqdm
