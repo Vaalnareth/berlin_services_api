@@ -47,8 +47,19 @@ def init_db():
         conn.execute(text("ALTER TABLE service MODIFY COLUMN erforderliche_unterlagen TEXT"))
         conn.execute(text("ALTER TABLE service MODIFY COLUMN gebuehren TEXT"))
         conn.execute(text("ALTER TABLE service MODIFY COLUMN rechtsgrundlagen TEXT"))
-        conn.execute(text("ALTER TABLE form MODIFY COLUMN url VARCHAR(2048)"))  # Hier die Länge der URL-Spalte ändern
-        conn.execute(text("ALTER TABLE form MODIFY COLUMN title VARCHAR(2048)"))  # Hier die Länge der Title-Spalte ändern
+        
+        # Prüfen und hinzufügen der Spalte digital_service
+        result = conn.execute(text("SHOW COLUMNS FROM service LIKE 'digital_service'"))
+        if not result.fetchone():
+            conn.execute(text("ALTER TABLE service ADD COLUMN digital_service BOOLEAN DEFAULT FALSE"))
+        
+        # Prüfen und hinzufügen der Spalte zustaendiges_amt
+        result = conn.execute(text("SHOW COLUMNS FROM service LIKE 'zustaendiges_amt'"))
+        if not result.fetchone():
+            conn.execute(text("ALTER TABLE service ADD COLUMN zustaendiges_amt TEXT"))
+        
+        conn.execute(text("ALTER TABLE form MODIFY COLUMN url VARCHAR(2048)"))
+        conn.execute(text("ALTER TABLE form MODIFY COLUMN title VARCHAR(2048)"))
 
 @contextmanager
 def get_session():
@@ -71,6 +82,8 @@ class Service(SQLModel, table=True):
     erforderliche_unterlagen: Optional[str] = Field(sa_column=Column(Text))
     gebuehren: Optional[str] = Field(sa_column=Column(Text))
     rechtsgrundlagen: Optional[str] = Field(sa_column=Column(Text))
+    digital_service: bool
+    zustaendiges_amt: Optional[str] = Field(sa_column=Column(Text))
     forms: List["Form"] = Relationship(back_populates="service")
 
 class Form(SQLModel, table=True):
@@ -80,7 +93,7 @@ class Form(SQLModel, table=True):
     service_id: Optional[int] = Field(default=None, foreign_key="service.id")
     service: Optional[Service] = Relationship(back_populates="forms")
 
-class User(SQLModel, table=True):  # Hinzufügen der User-Klasse
+class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str
     email: str
@@ -98,12 +111,13 @@ app.include_router(api_router)
 
 	
 #### app/routes.py
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from fastapi.security import OAuth2PasswordRequestForm
 from app.db import get_session
 from app.models import Service, Form, User
 from app.auth import authenticate_user, create_access_token, get_current_active_user
+from typing import Optional
 
 router = APIRouter()
 
@@ -126,6 +140,23 @@ def read_users_me(current_user: User = Depends(get_current_active_user)):
 @router.get("/services/")
 def read_services(skip: int = 0, limit: int = 10, db: Session = Depends(get_session)):
     services = db.query(Service).offset(skip).limit(limit).all()
+    return services
+
+@router.get("/ALL-SERVICES")
+def get_all_services(
+    digital_service: Optional[bool] = Query(None, alias="DIGITAL-SERVICE"),
+    responsible_office: Optional[str] = Query(None, alias="RESPONSIBLE-OFFICE"),
+    db: Session = Depends(get_session)
+):
+    query = db.query(Service)
+    
+    if digital_service is not None:
+        query = query.filter(Service.digital_service == digital_service)
+    
+    if responsible_office:
+        query = query.filter(Service.responsible_office == responsible_office)
+    
+    services = query.all()
     return services
 	
 	
@@ -191,13 +222,24 @@ def extract_info(url):
             formular_links = formular_list.find_all('a')
             formulare = [{'title': link.text.strip(), 'url': link['href']} for link in formular_links]
 
+    # Extracting the responsible offices
+    responsible_offices = []
+    for label in soup.select('label.form-check-label strong'):
+        responsible_offices.append(label.get_text(strip=True))
+    zustaendiges_amt = ", ".join(responsible_offices)  # Join multiple offices with a comma
+
+    # Überprüfen, ob der Link "Jetzt online erledigen" vorhanden ist
+    digital_service = bool(soup.select_one('a.list-item-style[title="Jetzt online erledigen"]'))
+
     return {
         "title": title,
         "voraussetzungen": voraussetzungen,
         "erforderliche_unterlagen": erforderliche_unterlagen,
         "gebuehren": gebuehren,
         "rechtsgrundlagen": rechtsgrundlagen,
-        "formulare": formulare
+        "formulare": formulare,
+        "digital_service": digital_service,
+        "zustaendiges_amt": zustaendiges_amt
     }
 
 def crawl_data():
@@ -244,7 +286,9 @@ def crawl_data():
                 voraussetzungen=service_data['voraussetzungen'],
                 erforderliche_unterlagen=service_data['erforderliche_unterlagen'],
                 gebuehren=service_data['gebuehren'],
-                rechtsgrundlagen=service_data['rechtsgrundlagen']
+                rechtsgrundlagen=service_data['rechtsgrundlagen'],
+                digital_service=service_data['digital_service'],
+                zustaendiges_amt=service_data['zustaendiges_amt']
             )
             services.append(service)
 

@@ -9,6 +9,8 @@ class Service(SQLModel, table=True):
     erforderliche_unterlagen: Optional[str] = Field(sa_column=Column(Text))
     gebuehren: Optional[str] = Field(sa_column=Column(Text))
     rechtsgrundlagen: Optional[str] = Field(sa_column=Column(Text))
+    digital_service: bool
+    zustaendiges_amt: Optional[str] = Field(sa_column=Column(Text))
     forms: List["Form"] = Relationship(back_populates="service")
 
 class Form(SQLModel, table=True):
@@ -18,7 +20,7 @@ class Form(SQLModel, table=True):
     service_id: Optional[int] = Field(default=None, foreign_key="service.id")
     service: Optional[Service] = Relationship(back_populates="forms")
 
-class User(SQLModel, table=True):  # Hinzufügen der User-Klasse
+class User(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str
     email: str

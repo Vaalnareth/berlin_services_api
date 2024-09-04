@@ -39,8 +39,19 @@ def init_db():
         conn.execute(text("ALTER TABLE service MODIFY COLUMN erforderliche_unterlagen TEXT"))
         conn.execute(text("ALTER TABLE service MODIFY COLUMN gebuehren TEXT"))
         conn.execute(text("ALTER TABLE service MODIFY COLUMN rechtsgrundlagen TEXT"))
-        conn.execute(text("ALTER TABLE form MODIFY COLUMN url VARCHAR(2048)"))  # Hier die Länge der URL-Spalte ändern
-        conn.execute(text("ALTER TABLE form MODIFY COLUMN title VARCHAR(2048)"))  # Hier die Länge der Title-Spalte ändern
+        
+        # Prüfen und hinzufügen der Spalte digital_service
+        result = conn.execute(text("SHOW COLUMNS FROM service LIKE 'digital_service'"))
+        if not result.fetchone():
+            conn.execute(text("ALTER TABLE service ADD COLUMN digital_service BOOLEAN DEFAULT FALSE"))
+        
+        # Prüfen und hinzufügen der Spalte zustaendiges_amt
+        result = conn.execute(text("SHOW COLUMNS FROM service LIKE 'zustaendiges_amt'"))
+        if not result.fetchone():
+            conn.execute(text("ALTER TABLE service ADD COLUMN zustaendiges_amt TEXT"))
+        
+        conn.execute(text("ALTER TABLE form MODIFY COLUMN url VARCHAR(2048)"))
+        conn.execute(text("ALTER TABLE form MODIFY COLUMN title VARCHAR(2048)"))
 
 @contextmanager
 def get_session():

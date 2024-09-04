@@ -59,13 +59,24 @@ def extract_info(url):
             formular_links = formular_list.find_all('a')
             formulare = [{'title': link.text.strip(), 'url': link['href']} for link in formular_links]
 
+    # Extracting the responsible offices
+    responsible_offices = []
+    for label in soup.select('label.form-check-label strong'):
+        responsible_offices.append(label.get_text(strip=True))
+    zustaendiges_amt = ", ".join(responsible_offices)  # Join multiple offices with a comma
+
+    # Überprüfen, ob der Link "Jetzt online erledigen" vorhanden ist
+    digital_service = bool(soup.select_one('a.list-item-style[title="Jetzt online erledigen"]'))
+
     return {
         "title": title,
         "voraussetzungen": voraussetzungen,
         "erforderliche_unterlagen": erforderliche_unterlagen,
         "gebuehren": gebuehren,
         "rechtsgrundlagen": rechtsgrundlagen,
-        "formulare": formulare
+        "formulare": formulare,
+        "digital_service": digital_service,
+        "zustaendiges_amt": zustaendiges_amt
     }
 
 def crawl_data():
@@ -112,7 +123,9 @@ def crawl_data():
                 voraussetzungen=service_data['voraussetzungen'],
                 erforderliche_unterlagen=service_data['erforderliche_unterlagen'],
                 gebuehren=service_data['gebuehren'],
-                rechtsgrundlagen=service_data['rechtsgrundlagen']
+                rechtsgrundlagen=service_data['rechtsgrundlagen'],
+                digital_service=service_data['digital_service'],
+                zustaendiges_amt=service_data['zustaendiges_amt']
             )
             services.append(service)
 
