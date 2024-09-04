@@ -4,7 +4,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from app.db import get_session
 from app.models import Service, Form, User
 from app.auth import authenticate_user, create_access_token, get_current_active_user
-from typing import Optional
+from typing import Optional, List
 
 router = APIRouter()
 
@@ -41,7 +41,24 @@ def get_all_services(
         query = query.filter(Service.digital_service == digital_service)
     
     if responsible_office:
-        query = query.filter(Service.responsible_office == responsible_office)
+        query = query.filter(Service.zustaendiges_amt == responsible_office)
     
     services = query.all()
     return services
+
+@router.get("/ALL-SERVICES", response_model=List[dict])
+def get_all_service_titles(db: Session = Depends(get_session)):
+    services = db.query(Service).all()
+    return [{"id": service.id, "title": service.title} for service in services]
+
+@router.get("/SERVICE/{service_id}", response_model=Service)
+def get_service(service_id: int, db: Session = Depends(get_session)):
+    service = db.query(Service).filter(Service.id == service_id).first()
+    if not service:
+        raise HTTPException(status_code=404, detail="Service not found")
+    return service
+
+@router.get("/ALL-FORMS", response_model=List[dict])
+def get_all_forms(db: Session = Depends(get_session)):
+    forms = db.query(Form).all()
+    return [{"id": form.id, "title": form.title, "url": form.url} for form in forms]
